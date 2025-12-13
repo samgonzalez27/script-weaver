@@ -1,115 +1,108 @@
-# Test-Driven Determinism (TDD)
+# Deterministic Task Execution — Test Design Document
 
 ## Purpose
 
-This document defines **behavioral tests** that prove the system is deterministic.
+This document defines observable behavioral tests that prove determinism.  
+All tests are black-box and implementation-agnostic.
 
-These tests validate externally observable behavior. They do not describe or constrain internal implementation.
-
----
-
-## Determinism Tests
-
-### Test 1: Same Inputs Produce the Same Task Hash
-
-**Given**
-- A task definition
-- A fixed set of input files
-
-**When**
-- The task hash is computed multiple times
-
-**Then**
-- The computed hash value is identical every time
+Passing these tests is required for correctness.
 
 ---
 
-### Test 2: Same Task Hash Prevents Re-Execution
+## Test 1 — Same Inputs Produce Same Hash
 
-**Given**
-- A task has been executed once
-- The execution result has been stored in the cache
+Given:
+- Identical task definition
+- Identical input file contents
+- Identical environment variables
 
-**When**
-- The task is invoked again with identical inputs
-
-**Then**
-- The task is not executed again
-- Cached results are returned instead
+Then:
+- The computed Task Hash MUST be identical.
 
 ---
 
-### Test 3: Different File Contents Invalidate the Hash
+## Test 2 — Same Hash Prevents Re-execution
 
-**Given**
-- A task with defined input files
+Given:
+- A previously executed task
+- An identical Task Hash
 
-**When**
-- The contents of any input file change
-
-**Then**
-- The task hash changes
-- The task is re-executed
+Then:
+- The task MUST NOT execute again.
+- Cached results MUST be replayed.
 
 ---
 
-### Test 4: Environment Variable Changes Invalidate the Hash
+## Test 3 — Input Content Change Invalidates Hash
 
-**Given**
-- A task that declares environment variables
+Given:
+- A single input file content change
 
-**When**
-- Any declared environment variable value changes
-
-**Then**
-- The task hash changes
-- Previously cached results are invalidated
+Then:
+- The Task Hash MUST change.
+- The task MUST re-execute.
 
 ---
 
-### Test 5: Output Normalization Removes Nondeterminism
+## Test 4 — Environment Variable Change Invalidates Hash
 
-**Given**
-- A task that produces nondeterministic output elements, such as timestamps or unordered data
+Given:
+- A change to any declared environment variable
 
-**When**
-- The task is executed multiple times with identical inputs
-
-**Then**
-- The normalized outputs are identical across all executions
+Then:
+- The Task Hash MUST change.
+- The task MUST re-execute.
 
 ---
 
-### Test 6: Cache Replay Fidelity
+## Test 5 — Undeclared Environment Variables Are Invisible
 
-**Given**
-- A completed task execution stored in the cache
+Given:
+- An environment variable not listed in `env`
 
-**When**
-- The task is replayed using the cache
-
-**Then**
-- Standard output is identical
-- Standard error is identical
-- Exit code is identical
-- Generated artifacts are byte-for-byte identical
+Then:
+- The task MUST NOT observe it.
+- The Task Hash MUST be unaffected.
 
 ---
 
-### Test 7: Failure Determinism
+## Test 6 — Output Normalization Removes Timestamps
 
-**Given**
-- A task that fails during execution
+Given:
+- Task output containing timestamps or nondeterministic metadata
 
-**When**
-- The same task is invoked again with identical inputs
-
-**Then**
-- The failure result is returned from the cache
-- The task is not re-executed
+Then:
+- Normalized cached output MUST be identical across runs.
 
 ---
 
-## Acceptance Criteria
+## Test 7 — Cache Replay Is Bit-for-Bit Identical
 
-The system is considered deterministic only if **all tests pass consistently across repeated executions over time**.
+Given:
+- Cached execution results
+
+Then:
+- stdout, stderr, exit code, and artifacts MUST match exactly on replay.
+
+---
+
+## Test 8 — Artifact Harvesting
+
+Given:
+- Declared outputs
+- Generated files within those paths
+
+Then:
+- Only declared outputs are captured.
+- Artifacts are stored and replayed from cache.
+
+---
+
+## Test 9 — Glob Expansion Is Strictly Sorted
+
+Given:
+- Inputs defined using glob patterns
+
+Then:
+- Expanded file list MUST be strictly sorted.
+- Different filesystem ordering MUST NOT affect hashing or execution.

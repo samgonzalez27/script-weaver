@@ -1,167 +1,107 @@
-# Specification
+# Deterministic Task Execution Tool — Specification
 
 ## Purpose
 
-This document defines the **functional and behavioral requirements** that must be true for the deterministic task execution tool to be considered correct.
+This specification defines the externally observable behavior required for the tool to be considered correct.  
+The tool executes user-defined tasks in a deterministic manner such that identical inputs always produce identical outputs and cached results may be safely replayed.
 
-Any implementation that satisfies this specification is valid. Any behavior not explicitly defined here is considered undefined.
-
----
-
-## Core Concept
-
-The system executes user-defined tasks in a controlled environment such that:
-
-**Identical inputs always produce identical observable results.**
-
-This includes task identity, execution behavior, outputs, and cached results.
+This document defines *what must be true*, not how it is implemented.
 
 ---
 
 ## Task Definition Format
 
-Tasks are defined declaratively using either **YAML or JSON**.
+Tasks are defined declaratively using a structured configuration format (e.g., YAML or JSON).
 
-### Top-Level Structure
+Each task definition MUST include the following fields:
 
-A task definition file contains a mapping of task names to task definitions.
+### Required Fields
 
-Example (illustrative only):
+- **name**
+  - Logical identifier for the task.
+  - Used only for user reference.
 
-    tasks:
-      build:
-        inputs:
-          - src/**
-          - package.json
-        run: "command to execute"
-        env:
-          KEY: value
+- **inputs**
+  - A list of file paths or glob patterns.
+  - All inputs are expanded prior to execution.
+  - Expansion MUST be deterministic and strictly sorted.
 
----
+- **run**
+  - A command string to execute.
+  - Interpreted exactly as provided.
 
-## Required Task Fields
+### Optional Fields
 
-### inputs (required)
+- **env**
+  - A map of environment variables explicitly provided to the task.
+  - Only variables listed here are visible to the task.
 
-A list of file paths or glob patterns that define the complete input set for the task.
-
-Rules:
-- Paths are resolved relative to a fixed working directory.
-- Globs are expanded deterministically.
-- File contents, not timestamps or metadata, define input identity.
-
----
-
-### run (required)
-
-A command string representing the task’s execution logic.
-
-Rules:
-- The command string is treated as immutable input.
-- Any change to the command string invalidates prior cache entries.
+- **outputs**
+  - A list of file paths or directories expected to be produced by the task.
+  - Only declared outputs are eligible for artifact capture and caching.
 
 ---
 
-### env (optional)
+## Deterministic Guarantees
 
-A map of environment variables explicitly provided to the task.
+The tool MUST guarantee the following:
 
-Rules:
-- Only declared variables are visible during execution.
-- Undeclared environment variables must not influence execution.
-- Any change to declared variables invalidates prior cache entries.
+1. **Input Determinism**
+   - Input files are read by content.
+   - Glob expansion is strictly sorted.
+   - File ordering is stable across runs and machines.
+
+2. **Environment Determinism**
+   - Only explicitly declared environment variables are visible.
+   - Tool versions and binaries are the user’s responsibility and MUST be pinned via:
+     - Inputs, or
+     - Explicit environment variables.
+   - No implicit tool discovery is permitted.
+
+3. **Execution Determinism**
+   - Tasks execute in an isolated, controlled environment.
+   - External network access is disabled unless explicitly allowed.
+
+4. **Output Determinism**
+   - Outputs are normalized to remove nondeterministic data (e.g., timestamps).
+   - File ordering and metadata are stable.
 
 ---
 
-## Deterministic Guarantees (Hard Requirements)
+## Cache Key Definition
 
-The system **must guarantee** the following:
+Each task execution produces a **Task Hash**, which is computed from:
 
-1. **Task Identity Determinism**  
-   A task’s identity is a pure function of:
-   - Input file contents
-   - Task command
-   - Declared environment variables
-   - Referenced tool versions (if applicable)
+- Sorted list of input file contents
+- Expanded and sorted input paths
+- Task command (`run`)
+- Explicit environment variables (`env`)
+- Declared outputs
+- Working directory identity
 
-2. **Execution Isolation**  
-   Tasks execute in an environment where:
-   - Undeclared environment variables are inaccessible
-   - External network access is disabled unless explicitly allowed
-   - Working directory and filesystem view are controlled
-
-3. **Output Stability**  
-   All observable outputs are normalized to remove nondeterministic data, including:
-   - Timestamps
-   - Random ordering
-   - Unspecified locale or timezone effects
-
-4. **Repeatability**  
-   Re-running a task with identical inputs must produce byte-for-byte identical results or replay cached results.
+Any change to these components MUST produce a different Task Hash.
 
 ---
 
 ## Cache Behavior
 
-### Cache Key
+- If a Task Hash has been seen before:
+  - The task MUST NOT be re-executed.
+  - Cached results are replayed exactly.
 
-Each task execution is keyed by a **task hash**, computed from:
-- Sorted input file contents
-- Task command
-- Declared environment variables
-- Execution metadata required for determinism
-
----
-
-### Cache Contents
-
-For each task hash, the cache stores:
-- Standard output
-- Standard error
-- Exit code
-- Generated artifacts
-- Normalized execution metadata
-
----
-
-### Cache Replay Rules
-
-- If a matching task hash exists, execution must be skipped.
-- Cached results must be returned exactly as stored.
-- Cache replay must be indistinguishable from live execution.
+- Cached data includes:
+  - stdout
+  - stderr
+  - exit code
+  - artifacts defined by `outputs`
 
 ---
 
 ## Failure Behavior
 
-### Execution Failures
-
-If a task fails:
-- The failure result is cached.
-- Replaying the task returns the same failure result.
-
----
-
-### Invalid Tasks
-
-If a task definition is malformed:
-- The task must not execute.
-- A deterministic error must be returned.
-
----
-
-### Partial Execution
-
-If execution is interrupted:
-- No cache entry may be written.
-- The task must be treated as never executed.
-
----
-
-## Out of Scope
-
-This specification explicitly does **not** define:
-- User interfaces
-- Distributed execution
-- Remote caching
-- Scheduling or orchestration semantics
+- Failed executions (non-zero exit code) are cacheable.
+- Replaying a failed task MUST return:
+  - Identical stdout
+  - Identical stderr
+  - Identical exit code
+- Failed tasks MUST NOT partially update artifacts.

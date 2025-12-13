@@ -1,122 +1,94 @@
-# Data Dictionary
-
-## Purpose
-
-This document defines the **canonical meaning** of key system terms.
-
-These definitions are authoritative and must remain consistent across documentation, tests, and implementation to prevent semantic drift.
-
----
+# Deterministic Task Execution — Data Dictionary
 
 ## Task
+A declarative definition of work to be executed deterministically.
 
-**Definition**  
-A declarative description of work to be executed.
+Includes:
+- Inputs
+- Command
+- Declared environment
+- Declared outputs
 
-**Includes**
-- Input definitions
-- Execution command
-- Declared environment variables
-
-**Excludes**
-- Execution results
-- Runtime state
-- Side effects outside declared artifacts
+Excludes:
+- Implicit dependencies
+- External side effects
 
 ---
 
 ## Input
+Any file or file set whose content contributes to task identity.
 
-**Definition**  
-Any file content or declared value that influences task execution.
-
-**Includes**
+Includes:
 - File contents
-- Declared environment variable values
-- Task command text
+- Expanded, sorted paths
 
-**Excludes**
-- File metadata such as timestamps or permissions
-- Undeclared environment variables
-- Ambient system state
+Excludes:
+- File metadata not explicitly read
 
 ---
 
 ## Task Hash
+A deterministic identifier representing the full identity of a task execution.
 
-**Definition**  
-A deterministic identifier representing the complete input state of a task.
+Includes:
+- Inputs
+- Command
+- Environment variables
+- Declared outputs
+- Working directory identity
 
-**Includes**
-- All data required to uniquely determine task execution behavior
-
-**Excludes**
-- Execution results
-- Machine-specific identifiers
-- Runtime metadata
+Excludes:
+- Timestamps
+- Machine-specific data
 
 ---
 
 ## Artifact
+A file or directory produced by a task and explicitly declared in `outputs`.
 
-**Definition**  
-A persisted output produced by a task execution.
+Includes:
+- Normalized file contents
+- Stable metadata
 
-**Includes**
-- Generated files
-- Build outputs
-- Reports or derived data products
-
-**Excludes**
-- Logs unless explicitly declared
-- Temporary or intermediate files not retained
+Excludes:
+- Undeclared files
+- Temporary or intermediate files
 
 ---
 
 ## Cache Entry
+A stored result of a task execution keyed by Task Hash.
 
-**Definition**  
-A stored record of a completed task execution keyed by task hash.
+Includes:
+- stdout
+- stderr
+- exit code
+- artifacts
 
-**Includes**
-- Standard output
-- Standard error
-- Exit code
-- Generated artifacts
-- Normalized execution metadata
-
-**Excludes**
-- Partial executions
-- Interrupted or incomplete runs
+Excludes:
+- Execution timestamps
+- Host-specific metadata
 
 ---
 
 ## Deterministic Environment
+A controlled execution context where all observable inputs are explicit.
 
-**Definition**  
-An execution context where all sources of nondeterminism are controlled or eliminated.
+Includes:
+- Declared environment variables
+- Pinned tools via inputs or env
 
-**Includes**
-- Fixed working directory
-- Explicitly declared environment variables
-- Normalized locale, time, and ordering behavior
-
-**Excludes**
-- Undeclared environment variables
-- External network access unless explicitly allowed
-- Ambient operating system state
+Excludes:
+- Implicit system state
+- External network access (unless allowed)
 
 ---
 
 ## Replay
+The act of returning cached results without re-executing a task.
 
-**Definition**  
-The act of returning cached task results without re-executing the task.
+Includes:
+- Bit-for-bit identical outputs
 
-**Includes**
-- Identical outputs and artifacts
-- Identical failure behavior
-
-**Excludes**
-- Recomputing task logic
-- Producing new side effects
+Excludes:
+- Any execution side effects
