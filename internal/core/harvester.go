@@ -126,8 +126,18 @@ func (h *Harvester) Harvest(declaredOutputs []string) (*ArtifactSet, error) {
 			content = h.Normalizer.Normalize(content)
 		}
 
-		// Normalize path to forward slashes for cross-platform determinism
-		normPath := filepath.ToSlash(path)
+		// Store paths relative to BaseDir for portability and correct replay location.
+		rel, err := filepath.Rel(h.BaseDir, path)
+		if err != nil {
+			return nil, fmt.Errorf("computing relative artifact path %q: %w", path, err)
+		}
+		// Guard against outputs outside the working directory.
+		if rel == ".." || (len(rel) >= 3 && rel[:3] == ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("artifact path escapes base directory: %s", rel)
+		}
+
+		// Normalize path to forward slashes for cross-platform determinism.
+		normPath := filepath.ToSlash(rel)
 
 		artifacts = append(artifacts, Artifact{
 			Path:    normPath,
