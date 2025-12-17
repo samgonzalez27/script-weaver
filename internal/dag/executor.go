@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"scriptweaver/internal/core"
+	"scriptweaver/internal/incremental"
 )
 
 // TaskRunner executes a single task.
@@ -31,6 +32,10 @@ type TaskRunner interface {
 type Executor struct {
 	Graph  *TaskGraph
 	Runner TaskRunner
+
+	// Plan overlays the static graph with deterministic incremental decisions.
+	// If nil, the executor uses Runner.Probe to decide cache reuse.
+	Plan *incremental.IncrementalPlan
 
 	mu    sync.Mutex
 	state ExecutionState
@@ -116,6 +121,115 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 		next := ready[0]
 		task := e.Graph.nodesByName[next].Task
 
+		// Incremental plan mode: obey the precomputed decision overlay.
+		if e.Plan != nil {
+			decision := e.Plan.Decisions[next]
+			if decision == incremental.DecisionReuseCache {
+				// Treat restoration as a deterministic "run" step so failures propagate via Sprint-01 rules.
+				if err := Transition(e.state, next, TaskPending, TaskRunning); err != nil {
+					e.mu.Unlock()
+					return nil, err
+				}
+				e.mu.Unlock()
+
+				restoreRunner, ok := e.Runner.(interface {
+					Restore(ctx context.Context, task core.Task) (*NodeResult, error)
+				})
+				if !ok {
+					return nil, fmt.Errorf("runner does not support Restore for incremental plan execution")
+				}
+
+				res, err := restoreRunner.Restore(ctx, task)
+				if err != nil {
+					// Cached restoration failure is treated as a task failure (not an executor fatal error).
+					e.mu.Lock()
+					order = append(order, next)
+					stderr[next] = []byte(err.Error())
+					exitCodes[next] = 1
+					if ferr := FailAndPropagate(e.Graph, e.state, next); ferr != nil {
+						e.mu.Unlock()
+						return nil, ferr
+					}
+					e.mu.Unlock()
+					continue
+				}
+				if res == nil {
+					e.mu.Lock()
+					order = append(order, next)
+					stderr[next] = []byte("nil restore result")
+					exitCodes[next] = 1
+					if ferr := FailAndPropagate(e.Graph, e.state, next); ferr != nil {
+						e.mu.Unlock()
+						return nil, ferr
+					}
+					e.mu.Unlock()
+					continue
+				}
+
+				e.mu.Lock()
+				order = append(order, next)
+				taskHashes[next] = res.Hash
+				stdout[next] = res.Stdout
+				stderr[next] = res.Stderr
+				exitCodes[next] = res.ExitCode
+
+				if res.ExitCode == 0 {
+					if err := Transition(e.state, next, TaskRunning, TaskCompleted); err != nil {
+						e.mu.Unlock()
+						return nil, err
+					}
+					e.mu.Unlock()
+					continue
+				}
+				if err := FailAndPropagate(e.Graph, e.state, next); err != nil {
+					e.mu.Unlock()
+					return nil, err
+				}
+				e.mu.Unlock()
+				continue
+			}
+
+			// DecisionExecute: do not probe cache. Always execute.
+			if decision == incremental.DecisionExecute {
+				if err := Transition(e.state, next, TaskPending, TaskRunning); err != nil {
+					e.mu.Unlock()
+					return nil, err
+				}
+				e.mu.Unlock()
+
+				runRes, err := e.Runner.Run(ctx, task)
+				if err != nil {
+					return nil, fmt.Errorf("executing %q: %w", next, err)
+				}
+				if runRes == nil {
+					return nil, fmt.Errorf("executing %q: nil result", next)
+				}
+
+				e.mu.Lock()
+				order = append(order, next)
+				taskHashes[next] = runRes.Hash
+				stdout[next] = runRes.Stdout
+				stderr[next] = runRes.Stderr
+				exitCodes[next] = runRes.ExitCode
+
+				if runRes.ExitCode == 0 {
+					if err := Transition(e.state, next, TaskRunning, TaskCompleted); err != nil {
+						e.mu.Unlock()
+						return nil, err
+					}
+					e.mu.Unlock()
+					continue
+				}
+				if err := FailAndPropagate(e.Graph, e.state, next); err != nil {
+					e.mu.Unlock()
+					return nil, err
+				}
+				e.mu.Unlock()
+				continue
+			}
+		}
+
+		// Default mode: probe cache on-the-fly.
 		probeRes, cached, err := e.Runner.Probe(ctx, task)
 		if err != nil {
 			e.mu.Unlock()
@@ -182,6 +296,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 type workItem struct {
 	name string
 	task core.Task
+
+	// reuseCache indicates the incremental plan decision for this task.
+	reuseCache bool
 }
 
 type workResult struct {
@@ -236,6 +353,24 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 		go func() {
 			defer wg.Done()
 			for w := range workCh {
+				if w.reuseCache {
+					restoreRunner, ok := e.Runner.(interface {
+						Restore(ctx context.Context, task core.Task) (*NodeResult, error)
+					})
+					if !ok {
+						doneCh <- workResult{name: w.name, result: &NodeResult{ExitCode: 1, Stderr: []byte("runner does not support Restore")}, err: nil}
+						continue
+					}
+					res, err := restoreRunner.Restore(ctx, w.task)
+					if err != nil {
+						// Treat restoration failure as a task failure (exit code != 0), not a fatal executor error.
+						res = &NodeResult{ExitCode: 1, Stderr: []byte(err.Error())}
+						err = nil
+					}
+					doneCh <- workResult{name: w.name, result: res, err: err}
+					continue
+				}
+
 				res, err := e.Runner.Run(ctx, w.task)
 				doneCh <- workResult{name: w.name, result: res, err: err}
 			}
@@ -289,29 +424,35 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 					return nil, fmt.Errorf("task %q at depth %d is pending but dependencies are not successful", name, depth)
 				}
 
-				res, cached, err := e.Runner.Probe(ctx, node.Task)
-				if err != nil {
-					e.mu.Unlock()
-					stopWorkers()
-					return nil, fmt.Errorf("probing cache for %q: %w", name, err)
-				}
-				if cached {
-					if res == nil {
+				// Incremental plan mode: do not probe cache; schedule based on decision.
+				reuseCache := false
+				if e.Plan != nil {
+					reuseCache = (e.Plan.Decisions[name] == incremental.DecisionReuseCache)
+				} else {
+					res, cached, err := e.Runner.Probe(ctx, node.Task)
+					if err != nil {
 						e.mu.Unlock()
 						stopWorkers()
-						return nil, fmt.Errorf("probing cache for %q: nil result", name)
+						return nil, fmt.Errorf("probing cache for %q: %w", name, err)
 					}
-					if err := Transition(e.state, name, TaskPending, TaskCached); err != nil {
-						e.mu.Unlock()
-						stopWorkers()
-						return nil, err
+					if cached {
+						if res == nil {
+							e.mu.Unlock()
+							stopWorkers()
+							return nil, fmt.Errorf("probing cache for %q: nil result", name)
+						}
+						if err := Transition(e.state, name, TaskPending, TaskCached); err != nil {
+							e.mu.Unlock()
+							stopWorkers()
+							return nil, err
+						}
+						taskHashes[name] = res.Hash
+						stdout[name] = res.Stdout
+						stderr[name] = res.Stderr
+						exitCodes[name] = res.ExitCode
+						nextToStart++
+						continue
 					}
-					taskHashes[name] = res.Hash
-					stdout[name] = res.Stdout
-					stderr[name] = res.Stderr
-					exitCodes[name] = res.ExitCode
-					nextToStart++
-					continue
 				}
 
 				if err := Transition(e.state, name, TaskPending, TaskRunning); err != nil {
@@ -322,7 +463,7 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 				order = append(order, name)
 				inFlight++
 				nextToStart++
-				workCh <- workItem{name: name, task: node.Task}
+				workCh <- workItem{name: name, task: node.Task, reuseCache: reuseCache}
 			}
 
 			// Are we done with this depth stage?

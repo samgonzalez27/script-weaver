@@ -59,6 +59,52 @@ func (r *CacheAwareRunner) Run(ctx context.Context, task core.Task) (*NodeResult
 	}, nil
 }
 
+// Restore restores artifacts and outputs for a task from cache using the task's computed hash.
+//
+// This is used by Sprint-02 incremental orchestration when a node is explicitly planned
+// as ReuseCache.
+func (r *CacheAwareRunner) Restore(ctx context.Context, task core.Task) (*NodeResult, error) {
+	if r == nil || r.Runner == nil {
+		return nil, fmt.Errorf("nil core runner")
+	}
+
+	inputSet, err := r.Runner.Resolver.Resolve(task.Inputs)
+	if err != nil {
+		return nil, fmt.Errorf("resolving inputs: %w", err)
+	}
+
+	hashInput := core.HashInput{
+		Inputs:     inputSet,
+		Command:    task.Run,
+		Env:        task.Env,
+		Outputs:    task.Outputs,
+		WorkingDir: r.Runner.WorkingDir,
+	}
+	hash := r.Runner.Hasher.ComputeHash(hashInput)
+
+	entry, err := r.Runner.Cache.Get(hash)
+	if err != nil {
+		return nil, fmt.Errorf("retrieving cache entry: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("cache entry missing for hash %s", hash)
+	}
+
+	restored, err := r.Runner.Replayer.RestoreArtifacts(task.Name, entry)
+	if err != nil {
+		return nil, err
+	}
+
+	return &NodeResult{
+		Hash:              hash,
+		Stdout:            entry.Stdout,
+		Stderr:            entry.Stderr,
+		ExitCode:          entry.ExitCode,
+		FromCache:         true,
+		ArtifactsRestored: restored,
+	}, nil
+}
+
 func (r *CacheAwareRunner) Probe(ctx context.Context, task core.Task) (*NodeResult, bool, error) {
 	if r == nil || r.Runner == nil {
 		return nil, false, fmt.Errorf("nil core runner")
