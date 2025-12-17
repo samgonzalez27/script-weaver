@@ -71,3 +71,45 @@ func TestBuildIncrementalPlan_IncrementalNoOpGraph_AllReuseCache(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanIncremental_ProducesInvalidationMapCoveringAllTasks(t *testing.T) {
+	oldGraph := &GraphSnapshot{Nodes: map[string]NodeSnapshot{
+		"A": {Name: "A", TaskHash: "hash-A", DeclaredInputs: []string{"a.txt"}, InputHash: "old"},
+		"B": {Name: "B", TaskHash: "hash-B", DeclaredInputs: []string{"b.txt"}, InputHash: "old", Upstream: []string{"A"}},
+	}}
+	newGraph := &GraphSnapshot{Nodes: map[string]NodeSnapshot{
+		"A": {Name: "A", TaskHash: "hash-A", DeclaredInputs: []string{"a.txt"}, InputHash: "old"},
+		"B": {Name: "B", TaskHash: "hash-B", DeclaredInputs: []string{"b.txt"}, InputHash: "new", Upstream: []string{"A"}}, // direct invalidation
+	}}
+
+	cache := core.NewMemoryCache()
+	if err := cache.Put(&core.CacheEntry{Hash: core.TaskHash("hash-A")}); err != nil {
+		t.Fatalf("seed cache A: %v", err)
+	}
+	if err := cache.Put(&core.CacheEntry{Hash: core.TaskHash("hash-B")}); err != nil {
+		t.Fatalf("seed cache B: %v", err)
+	}
+
+	res, err := PlanIncremental(oldGraph, newGraph, cache)
+	if err != nil {
+		t.Fatalf("PlanIncremental failed: %v", err)
+	}
+	if res == nil || res.Plan == nil {
+		t.Fatalf("expected non-nil planning result")
+	}
+	if len(res.Invalidation) != len(newGraph.Nodes) {
+		t.Fatalf("expected invalidation map to include all tasks: got %d want %d", len(res.Invalidation), len(newGraph.Nodes))
+	}
+	if _, ok := res.Invalidation["A"]; !ok {
+		t.Fatalf("missing invalidation entry for A")
+	}
+	if _, ok := res.Invalidation["B"]; !ok {
+		t.Fatalf("missing invalidation entry for B")
+	}
+	if res.Invalidation["A"].Invalidated {
+		t.Fatalf("expected A validated (not invalidated)")
+	}
+	if !res.Invalidation["B"].Invalidated {
+		t.Fatalf("expected B invalidated")
+	}
+}

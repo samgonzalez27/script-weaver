@@ -31,6 +31,18 @@ type IncrementalPlan struct {
 	Decisions map[string]NodeExecutionDecision
 }
 
+// PlanningResult is the deterministic output of the incremental planning phase.
+//
+// It contains:
+//   - Invalidation: per-task invalidation state (source of truth)
+//   - Plan: per-task execution decision overlay
+//
+// The planning phase must not execute tasks; it is computed purely from snapshots and cache presence.
+type PlanningResult struct {
+	Invalidation InvalidationMap
+	Plan         *IncrementalPlan
+}
+
 // SerializeDeterministic returns a deterministic byte representation of the plan.
 //
 // Determinism strategy:
@@ -179,4 +191,21 @@ func BuildIncrementalPlan(graph *GraphSnapshot, invalidation InvalidationMap, ca
 	}
 
 	return plan, nil
+}
+
+// PlanIncremental computes the InvalidationMap and the IncrementalPlan for newGraph.
+//
+// Requirements (Sprint-04 invalidation engine):
+//   - The InvalidationMap is the source of truth and must include an entry for every task in newGraph.
+//   - Planning must not execute tasks.
+//
+// This function is a convenience integration point so callers do not need to manually stitch
+// invalidation + plan building.
+func PlanIncremental(oldGraph, newGraph *GraphSnapshot, cache core.Cache) (*PlanningResult, error) {
+	inv := CalculateInvalidation(oldGraph, newGraph)
+	plan, err := BuildIncrementalPlan(newGraph, inv, cache)
+	if err != nil {
+		return nil, err
+	}
+	return &PlanningResult{Invalidation: inv, Plan: plan}, nil
 }
