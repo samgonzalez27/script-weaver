@@ -1,0 +1,32 @@
+{
+    "schema_version": "1.0.0",
+    "graph": {
+        "nodes": [
+            {
+                "id": "node-1",
+                "type": "task",
+                "inputs": {
+                    "value": 1
+                },
+                "outputs": [
+                    "out"
+                ]
+            },
+            {
+                "id": "node-1",
+                "type": "task",
+                "inputs": {
+                    "value": 2
+                },
+                "outputs": [
+                    "out"
+                ]
+            }
+        ],
+        "edges": []
+    },
+    "metadata": {
+        "name": "Duplicate IDs",
+        "description": "Invalid: contains duplicate node ID 'node-1'"
+    }
+}

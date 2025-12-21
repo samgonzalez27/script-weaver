@@ -1,0 +1,85 @@
+{
+    "schema_version": "1.0.0",
+    "graph": {
+        "nodes": [
+            {
+                "id": "fetch-data",
+                "type": "http",
+                "inputs": {
+                    "url": "https://api.example.com/data",
+                    "method": "GET",
+                    "headers": {
+                        "Authorization": "Bearer token123"
+                    }
+                },
+                "outputs": [
+                    "response",
+                    "status_code"
+                ]
+            },
+            {
+                "id": "transform",
+                "type": "jq",
+                "inputs": {
+                    "query": ".data | map(.name)",
+                    "input_ref": "fetch-data.response"
+                },
+                "outputs": [
+                    "result"
+                ]
+            },
+            {
+                "id": "validate",
+                "type": "schema",
+                "inputs": {
+                    "data_ref": "transform.result",
+                    "schema": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "outputs": [
+                    "valid",
+                    "errors"
+                ]
+            },
+            {
+                "id": "store",
+                "type": "file",
+                "inputs": {
+                    "path": "/tmp/output.json",
+                    "data_ref": "validate.result",
+                    "mode": "write"
+                },
+                "outputs": [
+                    "bytes_written"
+                ]
+            }
+        ],
+        "edges": [
+            {
+                "from": "fetch-data",
+                "to": "transform"
+            },
+            {
+                "from": "transform",
+                "to": "validate"
+            },
+            {
+                "from": "validate",
+                "to": "store"
+            }
+        ]
+    },
+    "metadata": {
+        "name": "Data Pipeline",
+        "description": "Fetches data from API, transforms, validates, and stores",
+        "labels": [
+            "production",
+            "etl",
+            "v2"
+        ]
+    }
+}

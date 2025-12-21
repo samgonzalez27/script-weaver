@@ -1,0 +1,43 @@
+{
+    "schema_version": "1.0.0",
+    "graph": {
+        "nodes": [
+            {
+                "id": "a",
+                "type": "task",
+                "inputs": {},
+                "outputs": []
+            },
+            {
+                "id": "b",
+                "type": "task",
+                "inputs": {},
+                "outputs": []
+            },
+            {
+                "id": "c",
+                "type": "task",
+                "inputs": {},
+                "outputs": []
+            }
+        ],
+        "edges": [
+            {
+                "from": "a",
+                "to": "b"
+            },
+            {
+                "from": "b",
+                "to": "c"
+            },
+            {
+                "from": "c",
+                "to": "a"
+            }
+        ]
+    },
+    "metadata": {
+        "name": "Cyclic Graph",
+        "description": "Invalid: contains cycle a -> b -> c -> a"
+    }
+}
