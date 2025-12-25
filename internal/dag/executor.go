@@ -88,6 +88,10 @@ type Executor struct {
 	// crash recovery semantics (system failure resumable if checkpoints exist).
 	Observer NodeObserver
 
+	// Hooks provides optional lifecycle hook points.
+	// Hook implementations are responsible for isolation (panic recovery, logging).
+	Hooks LifecycleHooks
+
 	mu    sync.Mutex
 	state ExecutionState
 }
@@ -141,6 +145,12 @@ func (e *Executor) StateSnapshot() ExecutionState {
 func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	hooks := e.Hooks
+	if hooks != nil {
+		hooks.BeforeRun(ctx)
+		defer hooks.AfterRun(ctx)
 	}
 
 	rec := trace.NewRecorder()
@@ -221,6 +231,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 		}
 
 		next := ready[0]
+		if hooks != nil {
+			hooks.BeforeNode(ctx, next)
+		}
 		task := e.Graph.nodesByName[next].Task
 
 		// Incremental plan mode: obey the precomputed decision overlay.
@@ -308,6 +321,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 							return nil, err
 						}
 					}
+					if hooks != nil {
+						hooks.AfterNode(ctx, next)
+					}
 					continue
 				}
 				trace.SafeRecord(rec, trace.TraceEvent{Kind: trace.EventTaskFailed, TaskID: next})
@@ -319,6 +335,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 					return nil, err
 				}
 				e.mu.Unlock()
+				if hooks != nil {
+					hooks.AfterNode(ctx, next)
+				}
 				continue
 			}
 
@@ -359,6 +378,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 							return nil, err
 						}
 					}
+					if hooks != nil {
+						hooks.AfterNode(ctx, next)
+					}
 					continue
 				}
 				trace.SafeRecord(rec, trace.TraceEvent{Kind: trace.EventTaskFailed, TaskID: next})
@@ -370,6 +392,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 					return nil, err
 				}
 				e.mu.Unlock()
+				if hooks != nil {
+					hooks.AfterNode(ctx, next)
+				}
 				continue
 			}
 		}
@@ -398,6 +423,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 			obs := e.Observer
 			traceSnap := rec.Snapshot()
 			e.mu.Unlock()
+			if hooks != nil {
+				hooks.AfterNode(ctx, next)
+			}
 			if obs != nil && probeRes.ExitCode == 0 {
 				if err := obs.OnTaskTerminal(task, probeRes, traceSnap); err != nil {
 					return nil, err
@@ -443,6 +471,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 					return nil, err
 				}
 			}
+			if hooks != nil {
+				hooks.AfterNode(ctx, next)
+			}
 			continue
 		}
 
@@ -456,6 +487,9 @@ func (e *Executor) RunSerial(ctx context.Context) (*GraphResult, error) {
 			return nil, err
 		}
 		e.mu.Unlock()
+		if hooks != nil {
+			hooks.AfterNode(ctx, next)
+		}
 	}
 }
 
@@ -486,6 +520,12 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 	}
 	if concurrency <= 0 {
 		return nil, fmt.Errorf("concurrency must be > 0")
+	}
+
+	hooks := e.Hooks
+	if hooks != nil {
+		hooks.BeforeRun(ctx)
+		defer hooks.AfterRun(ctx)
 	}
 
 	rec := trace.NewRecorder()
@@ -648,6 +688,10 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 						trace.SafeRecord(rec, trace.TraceEvent{Kind: trace.EventTaskCached, TaskID: name, Reason: "PlannedReuseCache"})
 				}
 
+				if hooks != nil {
+					hooks.BeforeNode(ctx, name)
+				}
+
 				if err := Transition(e.state, name, TaskPending, TaskRunning); err != nil {
 					e.mu.Unlock()
 					stopWorkers()
@@ -731,6 +775,9 @@ func (e *Executor) RunParallel(ctx context.Context, concurrency int) (*GraphResu
 				}
 				inFlight--
 				e.mu.Unlock()
+				if hooks != nil {
+					hooks.AfterNode(ctx, r.name)
+				}
 			}
 		}
 	}

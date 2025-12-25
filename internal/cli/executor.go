@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,10 +14,13 @@ import (
 	"scriptweaver/internal/dag"
 	"scriptweaver/internal/graph"
 	"scriptweaver/internal/incremental"
+	"scriptweaver/internal/pluginengine"
 	"scriptweaver/internal/projectintegration/engine/workspace"
 	"scriptweaver/internal/recovery/state"
 	"scriptweaver/internal/trace"
 )
+
+var discoverPlugins = pluginengine.DiscoverAndRegister
 
 // GraphExecutor is the minimal engine interface the CLI wires into.
 //
@@ -91,6 +95,12 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 		res.ExitCode = ExitConfigError
 		return res, wsErr
 	}
+
+	// Plugin registration occurs at engine startup.
+	// Discovery is deterministic and non-recursive; absence of plugins is valid.
+	pluginsRoot := filepath.Join(inv.WorkDir, pluginengine.DefaultPluginsRoot)
+	pluginLog := log.New(os.Stderr, "", 0)
+	_, _ = discoverPlugins(pluginsRoot, pluginLog)
 
 	graphObj, graphHash, err := loadGraphAndHash(inv.GraphPath)
 	if err != nil {
