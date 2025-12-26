@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"context"
 
 	"scriptweaver/internal/cli"
 )
@@ -20,7 +20,7 @@ func main() {
 			os.Exit(invErr.ExitCode)
 		}
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(cli.ExitInternalError)
+		os.Exit(cli.ExitExecutionError)
 	}
 
 	result, execErr := cli.Execute(context.Background(), inv)

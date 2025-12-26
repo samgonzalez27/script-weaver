@@ -31,11 +31,15 @@ func TestExecute_DiscoversPluginsFromWorkDirDefaultRoot(t *testing.T) {
 	}
 
 	inv := CLIInvocation{
-		GraphPath:     graphPath,
-		WorkDir:       workDir,
-		CacheDir:      filepath.Join(workDir, "cache"),
-		OutputDir:     filepath.Join(workDir, "out"),
-		ExecutionMode: ExecutionModeClean,
+		Command: CommandRun,
+		Run: RunInvocation{
+			GraphPath:    graphPath,
+			WorkDir:      workDir,
+			CacheDir:     filepath.Join(workDir, "cache"),
+			OutputDir:    filepath.Join(workDir, "out"),
+			Mode:         ExecutionModeClean,
+			PluginsAllow: []string{"p1"},
+		},
 	}
 
 	// Override discovery function to capture the root it is called with.
@@ -60,5 +64,52 @@ func TestExecute_DiscoversPluginsFromWorkDirDefaultRoot(t *testing.T) {
 	wantRoot := filepath.Join(workDir, pluginengine.DefaultPluginsRoot)
 	if gotRoot != wantRoot {
 		t.Fatalf("discoverPlugins root = %q, want %q", gotRoot, wantRoot)
+	}
+}
+
+func TestExecute_Default_NoPluginsEnabled_DoesNotDiscover(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Create minimal workspace + graph.
+	if err := os.MkdirAll(filepath.Join(workDir, ".scriptweaver"), 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	graphPath := filepath.Join(workDir, "graph.json")
+	graphJSON := `{"tasks":[{"name":"t1","run":"echo ok"}],"edges":[]}`
+	if err := os.WriteFile(graphPath, []byte(graphJSON), 0o644); err != nil {
+		t.Fatalf("write graph: %v", err)
+	}
+
+	inv := CLIInvocation{
+		Command: CommandRun,
+		Run: RunInvocation{
+			GraphPath:    graphPath,
+			WorkDir:      workDir,
+			CacheDir:     filepath.Join(workDir, "cache"),
+			OutputDir:    filepath.Join(workDir, "out"),
+			Mode:         ExecutionModeClean,
+			Trace:        false,
+			PluginsAllow: nil,
+		},
+	}
+
+	old := discoverPlugins
+	t.Cleanup(func() { discoverPlugins = old })
+
+	called := false
+	discoverPlugins = func(string, pluginengine.Logger) (pluginengine.Registry, []error) {
+		called = true
+		return pluginengine.Registry{ByID: map[string]pluginengine.PluginManifest{}}, nil
+	}
+
+	res, err := ExecuteWithExecutor(context.Background(), inv, pluginDiscoveryStubExecutor{})
+	if err != nil {
+		t.Fatalf("ExecuteWithExecutor error: %v", err)
+	}
+	if res.ExitCode != ExitSuccess {
+		t.Fatalf("unexpected exit code: %d", res.ExitCode)
+	}
+	if called {
+		t.Fatalf("expected plugin discovery not to run")
 	}
 }

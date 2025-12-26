@@ -25,12 +25,14 @@ func TestFailureRecording_WritesFailureJSON_OnNodeFailure(t *testing.T) {
 	}
 
 	inv := CLIInvocation{
-		GraphPath:     filepath.Join(work, "graph.json"),
-		WorkDir:       work,
-		CacheDir:      filepath.Join(work, "cache"),
-		OutputDir:     filepath.Join(work, "out"),
-		ExecutionMode: ExecutionModeIncremental,
-		Trace:         TraceConfig{Enabled: false},
+		Command: CommandRun,
+		Run: RunInvocation{
+			WorkDir:   work,
+			GraphPath: filepath.Join(work, "graph.json"),
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "out"),
+			Mode:      ExecutionModeIncremental,
+		},
 	}
 
 	// Minimal valid graph file to pass graph loading.
@@ -40,7 +42,7 @@ func TestFailureRecording_WritesFailureJSON_OnNodeFailure(t *testing.T) {
 	  ],
 	  "edges": []
 	}`
-	if err := os.WriteFile(inv.GraphPath, []byte(graphJSON), 0o644); err != nil {
+	if err := os.WriteFile(inv.Run.GraphPath, []byte(graphJSON), 0o644); err != nil {
 		t.Fatalf("WriteFile graph: %v", err)
 	}
 
@@ -48,8 +50,8 @@ func TestFailureRecording_WritesFailureJSON_OnNodeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExecuteWithExecutor: %v", err)
 	}
-	if res.ExitCode != ExitGraphFailure {
-		t.Fatalf("expected ExitGraphFailure got %d", res.ExitCode)
+	if res.ExitCode != ExitExecutionError {
+		t.Fatalf("expected ExitExecutionError got %d", res.ExitCode)
 	}
 	// We don't know the run id, but a failure should have been recorded under .scriptweaver/runs.
 	runsDir := filepath.Join(work, ".scriptweaver", "runs")

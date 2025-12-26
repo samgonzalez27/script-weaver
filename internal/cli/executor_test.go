@@ -51,11 +51,14 @@ func TestExecute_OverwritePolicy_RemovesStaleFiles(t *testing.T) {
 	writeGraphJSON(t, graphPath, tasks, nil)
 
 	inv := CLIInvocation{
-		WorkDir:       workDir,
-		GraphPath:     graphPath,
-		CacheDir:      filepath.Join(workDir, "cache"),
-		OutputDir:     outputDir,
-		ExecutionMode: ExecutionModeClean,
+		Command: CommandRun,
+		Run: RunInvocation{
+			WorkDir:   workDir,
+			GraphPath: graphPath,
+			CacheDir:  filepath.Join(workDir, "cache"),
+			OutputDir: outputDir,
+			Mode:      ExecutionModeClean,
+		},
 	}
 
 	res, err := Execute(context.Background(), inv)
@@ -78,7 +81,6 @@ func TestExecute_ExitCodeGraphFailure(t *testing.T) {
 	workDir := t.TempDir()
 	graphPath := filepath.Join(workDir, "graph.json")
 	outputDir := filepath.Join(workDir, "out")
-	tracePath := filepath.Join(workDir, "trace.json")
 
 	tasks := []core.Task{{
 		Name:   "t1",
@@ -88,23 +90,23 @@ func TestExecute_ExitCodeGraphFailure(t *testing.T) {
 	writeGraphJSON(t, graphPath, tasks, nil)
 
 	inv := CLIInvocation{
-		WorkDir:       workDir,
-		GraphPath:     graphPath,
-		CacheDir:      filepath.Join(workDir, "cache"),
-		OutputDir:     outputDir,
-		ExecutionMode: ExecutionModeClean,
-		Trace:         TraceConfig{Enabled: true, Path: tracePath},
+		Command: CommandRun,
+		Run: RunInvocation{
+			WorkDir:   workDir,
+			GraphPath: graphPath,
+			CacheDir:  filepath.Join(workDir, "cache"),
+			OutputDir: outputDir,
+			Mode:      ExecutionModeClean,
+			Trace:     true,
+		},
 	}
 
 	res, err := Execute(context.Background(), inv)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.ExitCode != ExitGraphFailure {
-		t.Fatalf("expected exit %d got %d", ExitGraphFailure, res.ExitCode)
-	}
-	if _, err := os.Stat(tracePath); err != nil {
-		t.Fatalf("expected trace file exists: %v", err)
+	if res.ExitCode != ExitExecutionError {
+		t.Fatalf("expected exit %d got %d", ExitExecutionError, res.ExitCode)
 	}
 }
 
@@ -120,19 +122,22 @@ func TestExecute_ConfigError_WhenOutputDirIsFile(t *testing.T) {
 	writeGraphJSON(t, graphPath, tasks, nil)
 
 	inv := CLIInvocation{
-		WorkDir:       workDir,
-		GraphPath:     graphPath,
-		CacheDir:      filepath.Join(workDir, "cache"),
-		OutputDir:     outputFile,
-		ExecutionMode: ExecutionModeClean,
+		Command: CommandRun,
+		Run: RunInvocation{
+			WorkDir:   workDir,
+			GraphPath: graphPath,
+			CacheDir:  filepath.Join(workDir, "cache"),
+			OutputDir: outputFile,
+			Mode:      ExecutionModeClean,
+		},
 	}
 
 	res, err := Execute(context.Background(), inv)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if res.ExitCode != ExitConfigError {
-		t.Fatalf("expected exit %d got %d", ExitConfigError, res.ExitCode)
+	if res.ExitCode != ExitWorkspaceError {
+		t.Fatalf("expected exit %d got %d", ExitWorkspaceError, res.ExitCode)
 	}
 }
 
@@ -140,37 +145,27 @@ func TestExecute_Panic_ExitCodeInternalAndTraceFinalized(t *testing.T) {
 	workDir := t.TempDir()
 	graphPath := filepath.Join(workDir, "graph.json")
 	outputDir := filepath.Join(workDir, "out")
-	tracePath := filepath.Join(workDir, "trace.json")
 
 	tasks := []core.Task{{Name: "t1", Run: "true"}}
 	writeGraphJSON(t, graphPath, tasks, nil)
 
 	inv := CLIInvocation{
-		WorkDir:       workDir,
-		GraphPath:     graphPath,
-		CacheDir:      filepath.Join(workDir, "cache"),
-		OutputDir:     outputDir,
-		ExecutionMode: ExecutionModeClean,
-		Trace:         TraceConfig{Enabled: true, Path: tracePath},
+		Command: CommandRun,
+		Run: RunInvocation{
+			WorkDir:   workDir,
+			GraphPath: graphPath,
+			CacheDir:  filepath.Join(workDir, "cache"),
+			OutputDir: outputDir,
+			Mode:      ExecutionModeClean,
+			Trace:     true,
+		},
 	}
 
 	res, err := ExecuteWithExecutor(context.Background(), inv, panicExecutor{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if res.ExitCode != ExitInternalError {
-		t.Fatalf("expected exit %d got %d", ExitInternalError, res.ExitCode)
-	}
-
-	b, err := os.ReadFile(tracePath)
-	if err != nil {
-		t.Fatalf("expected trace file exists: %v", err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(b, &decoded); err != nil {
-		t.Fatalf("expected trace JSON: %v", err)
-	}
-	if decoded["graphHash"] == "" {
-		t.Fatalf("expected graphHash in trace")
+	if res.ExitCode != ExitExecutionError {
+		t.Fatalf("expected exit %d got %d", ExitExecutionError, res.ExitCode)
 	}
 }

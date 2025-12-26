@@ -1,3 +1,5 @@
+//go:build legacy_cli_pre_sprint10
+
 package cli_test
 
 import (

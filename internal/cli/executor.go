@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"scriptweaver/internal/core"
@@ -56,7 +58,7 @@ func (c cliGraphExecutor) Run(ctx context.Context, graph *dag.TaskGraph, runner 
 }
 
 type CLIResult struct {
-	ExitCode   int
+	ExitCode    int
 	GraphResult *dag.GraphResult
 }
 
@@ -73,8 +75,103 @@ func Execute(ctx context.Context, inv CLIInvocation) (CLIResult, error) {
 //   - Initialize trace output before execution and finalize after execution,
 //     even on panic/failure.
 //   - Translate engine outcomes to semantic exit codes.
+
 func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphExecutor) (res CLIResult, execErr error) {
-	res.ExitCode = ExitInternalError
+	switch inv.Command {
+	case CommandValidate:
+		return executeValidate(inv.Validate)
+	case CommandRun:
+		return executeRun(ctx, inv.Run, executor)
+	case CommandResume:
+		return executeResume(ctx, inv.Resume, executor)
+	case CommandPlugins:
+		return executePlugins(inv.Plugins)
+	default:
+		return CLIResult{ExitCode: ExitValidationError}, fmt.Errorf("unknown command: %q", inv.Command)
+	}
+}
+
+func executeValidate(inv ValidateInvocation) (CLIResult, error) {
+	_ = inv.Strict // Sprint-10: strict is accepted; graph loader currently has no warnings channel.
+	if strings.TrimSpace(inv.GraphPath) == "" {
+		return CLIResult{ExitCode: ExitValidationError}, fmt.Errorf("--graph is required")
+	}
+	_, err := LoadGraphFromFile(inv.GraphPath)
+	if err != nil {
+		return CLIResult{ExitCode: ExitValidationError}, err
+	}
+	return CLIResult{ExitCode: ExitSuccess}, nil
+}
+
+type execInvocation struct {
+	WorkDir          string
+	GraphPath        string
+	CacheDir         string
+	OutputDir        string
+	Mode             ExecutionMode
+	Trace            bool
+	PluginsAllowlist []string
+
+	IsResume        bool
+	PreviousRunID   string
+	RetryFailedOnly bool
+}
+
+func executeRun(ctx context.Context, inv RunInvocation, executor GraphExecutor) (CLIResult, error) {
+	ei := execInvocation{
+		WorkDir:          inv.WorkDir,
+		GraphPath:        inv.GraphPath,
+		CacheDir:         inv.CacheDir,
+		OutputDir:        inv.OutputDir,
+		Mode:             inv.Mode,
+		Trace:            inv.Trace,
+		PluginsAllowlist: inv.PluginsAllow,
+		IsResume:         false,
+	}
+	return executeGraph(ctx, ei, executor)
+}
+
+func executeResume(ctx context.Context, inv ResumeInvocation, executor GraphExecutor) (CLIResult, error) {
+	ei := execInvocation{
+		WorkDir:         inv.WorkDir,
+		GraphPath:       inv.GraphPath,
+		IsResume:        true,
+		PreviousRunID:   inv.PreviousRunID,
+		RetryFailedOnly: inv.RetryFailedOnly,
+	}
+	// Sprint-10 spec does not define cache-dir/output-dir flags for resume.
+	// We therefore avoid output-dir clearing and, if retry-failed-only is true,
+	// reuse the canonical workspace cache at <workdir>/.scriptweaver/cache.
+	if ei.RetryFailedOnly {
+		ei.Mode = ExecutionModeIncremental
+		ei.CacheDir = filepath.Join(ei.WorkDir, ".scriptweaver", "cache")
+	} else {
+		ei.Mode = ExecutionModeClean
+	}
+	return executeGraph(ctx, ei, executor)
+}
+
+func executePlugins(inv PluginsInvocation) (CLIResult, error) {
+	if inv.Subcommand != "list" {
+		return CLIResult{ExitCode: ExitValidationError}, fmt.Errorf("unknown plugins subcommand %q", inv.Subcommand)
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return CLIResult{ExitCode: ExitWorkspaceError}, fmt.Errorf("detect workdir: %w", err)
+	}
+	pluginsRoot := filepath.Join(root, pluginengine.DefaultPluginsRoot)
+	entries, err := listPluginStates(pluginsRoot)
+	if err != nil {
+		return CLIResult{ExitCode: ExitWorkspaceError}, err
+	}
+	for _, e := range entries {
+		fmt.Fprintln(os.Stdout, e)
+	}
+	return CLIResult{ExitCode: ExitSuccess}, nil
+}
+
+func executeGraph(ctx context.Context, inv execInvocation, executor GraphExecutor) (res CLIResult, execErr error) {
+	res.ExitCode = ExitExecutionError
 	if executor == nil {
 		return res, fmt.Errorf("nil executor")
 	}
@@ -89,23 +186,26 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 	_, wsErr := workspace.EnsureWorkspace(inv.WorkDir)
 	if wsErr != nil {
 		if runID != "" {
-			_ = rec.StartRun(state.Run{RunID: runID, GraphHash: "", StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
+			_ = rec.StartRun(state.Run{RunID: runID, GraphHash: "", StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.Mode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
 			_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "WorkspaceInvalid", Message: wsErr.Error(), Cause: wsErr})
 		}
-		res.ExitCode = ExitConfigError
+		res.ExitCode = ExitWorkspaceError
 		return res, wsErr
 	}
 
-	// Plugin registration occurs at engine startup.
-	// Discovery is deterministic and non-recursive; absence of plugins is valid.
-	pluginsRoot := filepath.Join(inv.WorkDir, pluginengine.DefaultPluginsRoot)
-	pluginLog := log.New(os.Stderr, "", 0)
-	_, _ = discoverPlugins(pluginsRoot, pluginLog)
+	// Plugin discovery is deterministic and non-recursive.
+	// Sprint-10: default behavior is no plugins enabled; therefore we only
+	// perform discovery during execution if an allowlist was explicitly provided.
+	if len(inv.PluginsAllowlist) > 0 {
+		pluginsRoot := filepath.Join(inv.WorkDir, pluginengine.DefaultPluginsRoot)
+		pluginLog := log.New(os.Stderr, "", 0)
+		_, _ = discoverPlugins(pluginsRoot, pluginLog)
+	}
 
 	graphObj, graphHash, err := loadGraphAndHash(inv.GraphPath)
 	if err != nil {
 		if runID != "" {
-			_ = rec.StartRun(state.Run{RunID: runID, GraphHash: "", StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
+			_ = rec.StartRun(state.Run{RunID: runID, GraphHash: "", StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.Mode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
 			var se *graph.SchemaError
 			var ste *graph.StructuralError
 			switch {
@@ -117,135 +217,103 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 				_ = rec.RecordFailure(runID, &state.GraphFailureError{Code: "GraphLoadError", Message: err.Error(), Cause: err})
 			}
 		}
-		res.ExitCode = ExitConfigError
+		res.ExitCode = ExitValidationError
 		return res, err
 	}
 
-	traceWriter, err := newTraceWriter(inv, graphHash)
-	if err != nil {
-		if runID != "" {
-			_ = rec.RecordFailure(runID, &state.SystemFailureError{Code: "TraceInit", Message: err.Error(), Cause: err})
+	// Resume mode: validate previous run and graph hash up-front.
+	var previousRunID *string
+	retryCount := 0
+	if inv.IsResume {
+		if strings.TrimSpace(inv.PreviousRunID) == "" {
+			res.ExitCode = ExitValidationError
+			return res, fmt.Errorf("--previous-run-id is required")
 		}
-		res.ExitCode = ExitConfigError
-		return res, err
+		prev, perr := st.LoadRun(inv.PreviousRunID)
+		if perr != nil {
+			res.ExitCode = ExitValidationError
+			return res, fmt.Errorf("previous run not found: %w", perr)
+		}
+		if prev.GraphHash != graphHash {
+			res.ExitCode = ExitValidationError
+			return res, fmt.Errorf("graph hash mismatch for previous run")
+		}
+		id := inv.PreviousRunID
+		previousRunID = &id
+		retryCount = prev.RetryCount + 1
 	}
+
+	traceEmitter := newTraceEmitter(inv.Trace, os.Stderr, graphHash)
 	defer func() {
-		// Always finalize trace output deterministically.
-		_ = traceWriter.Finalize(res.GraphResult)
+		_ = traceEmitter.Finalize(res.GraphResult)
 	}()
 
-	if err := prepareOutputDir(inv.OutputDir); err != nil {
-		if runID != "" {
-			_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "OutputDir", Message: err.Error(), Cause: err})
+	if strings.TrimSpace(inv.OutputDir) != "" {
+		if err := prepareOutputDir(inv.OutputDir); err != nil {
+			if runID != "" {
+				_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "OutputDir", Message: err.Error(), Cause: err})
+			}
+			res.ExitCode = ExitWorkspaceError
+			return res, err
 		}
-		res.ExitCode = ExitConfigError
-		return res, err
 	}
 
-	cache, err := cacheForMode(inv.ExecutionMode, inv.CacheDir)
+	cache, err := cacheForMode(inv.Mode, inv.CacheDir)
 	if err != nil {
 		if runID != "" {
 			_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "CacheDir", Message: err.Error(), Cause: err})
 		}
-		res.ExitCode = ExitConfigError
+		res.ExitCode = ExitWorkspaceError
 		return res, err
 	}
 
 	runner := core.NewRunner(inv.WorkDir, cache)
 	cacheRunner, err := dag.NewCacheAwareRunner(runner)
 	if err != nil {
-		res.ExitCode = ExitInternalError
+		res.ExitCode = ExitExecutionError
 		return res, err
 	}
 
-	// Create a checkpoint observer. Checkpoints are only meaningful for incremental/resume-only.
+	// Create a checkpoint observer. Checkpoints are only meaningful for incremental/resume.
 	var obs dag.NodeObserver
-	if runID != "" && (inv.ExecutionMode == ExecutionModeIncremental || inv.ExecutionMode == ExecutionModeResumeOnly) {
+	if runID != "" && inv.Mode == ExecutionModeIncremental {
 		validator := &state.CheckpointValidator{Store: st, Cache: cache, Harvester: core.NewHarvester(inv.WorkDir)}
 		obs = checkpointObserver{RunID: runID, Validator: validator}
 	}
 
-	// Resume planning (incremental/resume-only): best-effort attempt to reuse prior work.
-	// Clean mode ignores all checkpoints.
+	// Resume planning (resume only): best-effort attempt to reuse prior work.
 	var executorToUse GraphExecutor = executor
-	var previousRunID *string
-	retryCount := 0
 	var resumePlan *incremental.IncrementalPlan
-	if inv.ExecutionMode == ExecutionModeIncremental || inv.ExecutionMode == ExecutionModeResumeOnly {
-		prevID, perr := detectPreviousRunID(st, graphHash)
+	if inv.IsResume && inv.RetryFailedOnly {
+		if _, ferr := st.LoadFailure(inv.PreviousRunID); ferr != nil {
+			res.ExitCode = ExitValidationError
+			return res, fmt.Errorf("previous run has no recorded failure")
+		}
+		checkpoints, cerr := st.LoadAllCheckpoints(inv.PreviousRunID)
+		if cerr != nil {
+			res.ExitCode = ExitWorkspaceError
+			return res, cerr
+		}
+		if len(checkpoints) == 0 {
+			res.ExitCode = ExitValidationError
+			return res, fmt.Errorf("previous run has no checkpoints")
+		}
+		plan, _, _, _, perr := buildResumePlan(ctx, graphObj, runner, cacheRunner, cache, checkpoints)
 		if perr != nil {
-			if inv.ExecutionMode == ExecutionModeResumeOnly {
-				if runID != "" {
-					_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
-					_ = rec.RecordFailure(runID, &state.ExecutionFailureError{NodeID: "", Code: "ResumeIneligible", Message: perr.Error(), Cause: perr})
-				}
-				res.ExitCode = ExitConfigError
-				return res, perr
-			}
-		} else if prevID != "" {
-			prevRun, lerr := st.LoadRun(prevID)
-			if lerr == nil && prevRun.GraphHash == graphHash {
-				// Resume is only meaningful after a non-successful termination.
-				if _, ferr := st.LoadFailure(prevID); ferr == nil {
-					checkpoints, cerr := st.LoadAllCheckpoints(prevID)
-					if cerr == nil && len(checkpoints) > 0 {
-							plan, checkpointNode, snap, invMap, corruption := buildResumePlan(ctx, graphObj, runner, cacheRunner, cache, checkpoints)
-							if corruption != nil {
-								// Resume-only hard-fails; incremental falls back to scratch execution.
-								if inv.ExecutionMode == ExecutionModeResumeOnly {
-									if runID != "" {
-										_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
-										_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "WorkspaceCorrupt", Message: corruption.Error(), Cause: corruption})
-									}
-									res.ExitCode = ExitConfigError
-									return res, corruption
-								}
-								// incremental: ignore resume plan
-							} else if plan != nil && checkpointNode != "" {
-							candidatePrevID := prevID
-							candidatePrevPtr := &candidatePrevID
-							candidateRetry := prevRun.RetryCount + 1
-							newRun := state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: candidateRetry, Status: "running", PreviousRunID: candidatePrevPtr}
-							checker := &state.ResumeEligibilityChecker{Store: st, ProjectRoot: inv.WorkDir}
-							if err := checker.Check(state.ResumeEligibilityRequest{NewRun: newRun, ResumeFromNodeID: checkpointNode, Graph: snap, Invalidation: invMap}); err == nil {
-								resumePlan = plan
-								previousRunID = candidatePrevPtr
-								retryCount = candidateRetry
-								if _, ok := executor.(defaultGraphExecutor); ok {
-									executorToUse = cliGraphExecutor{Plan: resumePlan, Observer: obs}
-								}
-							} else if inv.ExecutionMode == ExecutionModeResumeOnly {
-								if runID != "" {
-									_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
-									_ = rec.RecordFailure(runID, &state.ExecutionFailureError{NodeID: "", Code: "ResumeIneligible", Message: err.Error(), Cause: err})
-								}
-								res.ExitCode = ExitConfigError
-								return res, err
-							}
-						}
-					}
-				}
-			}
+			res.ExitCode = ExitWorkspaceError
+			return res, perr
 		}
-		if inv.ExecutionMode == ExecutionModeResumeOnly && resumePlan == nil {
-			err := fmt.Errorf("resume-only mode requires an eligible previous run with checkpoints")
-			if runID != "" {
-				_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
-				_ = rec.RecordFailure(runID, &state.ExecutionFailureError{NodeID: "", Code: "ResumeIneligible", Message: err.Error(), Cause: err})
-			}
-			res.ExitCode = ExitConfigError
-			return res, err
-		}
+		resumePlan = plan
 	}
 
 	// Record the run metadata now that we know GraphHash and any run linkage.
 	if runID != "" {
-		_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: retryCount, Status: "running", PreviousRunID: previousRunID})
+		_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.Mode), RetryCount: retryCount, Status: "running", PreviousRunID: previousRunID})
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			res.ExitCode = ExitInternalError
+			res.ExitCode = ExitExecutionError
 			res.GraphResult = nil
 			execErr = fmt.Errorf("panic: %v", r)
 			if runID != "" {
@@ -255,7 +323,7 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 	}()
 
 	// If the caller provided the default executor, always run through the CLI-owned executor
-	// so we can attach checkpoint observer (even when resume is not possible).
+	// so we can attach checkpoint observer.
 	if _, ok := executor.(defaultGraphExecutor); ok {
 		executorToUse = cliGraphExecutor{Plan: resumePlan, Observer: obs}
 	}
@@ -265,12 +333,12 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 		if runID != "" {
 			_ = rec.RecordFailure(runID, &state.SystemFailureError{Code: "EngineError", Message: err.Error(), Cause: err})
 		}
-		res.ExitCode = ExitInternalError
+		res.ExitCode = ExitExecutionError
 		return res, err
 	}
 	res.GraphResult = gr
 	res.ExitCode = translateGraphResultToExitCode(gr)
-	if res.ExitCode == ExitGraphFailure && runID != "" {
+	if res.ExitCode == ExitExecutionError && runID != "" {
 		// Deterministically choose a representative failed node.
 		failed := firstFailedNode(gr)
 		_ = rec.RecordFailure(runID, &state.ExecutionFailureError{NodeID: failed, Code: "NodeFailed", Message: fmt.Sprintf("node %s failed", failed)})
@@ -510,11 +578,11 @@ func firstFailedNode(gr *dag.GraphResult) string {
 
 func translateGraphResultToExitCode(gr *dag.GraphResult) int {
 	if gr == nil {
-		return ExitInternalError
+		return ExitExecutionError
 	}
 	for _, st := range gr.FinalState {
 		if st == dag.TaskFailed {
-			return ExitGraphFailure
+			return ExitExecutionError
 		}
 	}
 	return ExitSuccess
@@ -523,14 +591,6 @@ func translateGraphResultToExitCode(gr *dag.GraphResult) int {
 func cacheForMode(mode ExecutionMode, cacheDir string) (core.Cache, error) {
 	switch mode {
 	case ExecutionModeIncremental:
-		if cacheDir == "" {
-			return nil, fmt.Errorf("cache dir is empty")
-		}
-		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create cache dir: %w", err)
-		}
-		return core.NewFileCache(cacheDir), nil
-	case ExecutionModeResumeOnly:
 		if cacheDir == "" {
 			return nil, fmt.Errorf("cache dir is empty")
 		}
@@ -547,9 +607,9 @@ func cacheForMode(mode ExecutionMode, cacheDir string) (core.Cache, error) {
 
 type noCache struct{}
 
-func (noCache) Has(core.TaskHash) (bool, error) { return false, nil }
+func (noCache) Has(core.TaskHash) (bool, error)             { return false, nil }
 func (noCache) Get(core.TaskHash) (*core.CacheEntry, error) { return nil, nil }
-func (noCache) Put(*core.CacheEntry) error { return nil }
+func (noCache) Put(*core.CacheEntry) error                  { return nil }
 
 func prepareOutputDir(dir string) error {
 	if dir == "" {
@@ -591,45 +651,36 @@ func loadGraphAndHash(path string) (*dag.TaskGraph, string, error) {
 }
 
 type traceFileWriter struct {
-	enabled bool
-	path    string
+	enabled   bool
+	w         io.Writer
 	graphHash string
 }
 
-func newTraceWriter(inv CLIInvocation, graphHash string) (*traceFileWriter, error) {
-	if !inv.Trace.Enabled {
-		return &traceFileWriter{enabled: false}, nil
+func newTraceEmitter(enabled bool, w io.Writer, graphHash string) *traceFileWriter {
+	if !enabled {
+		return &traceFileWriter{enabled: false}
 	}
-	if inv.Trace.Path == "" {
-		return nil, fmt.Errorf("trace enabled but path is empty")
+	if w == nil {
+		w = io.Discard
 	}
-	if err := os.MkdirAll(filepath.Dir(inv.Trace.Path), 0o755); err != nil {
-		return nil, fmt.Errorf("create trace dir: %w", err)
-	}
-	// Create an empty trace file eagerly so the destination is reserved and
-	// so that even a panic results in a deterministic artifact.
-	w := &traceFileWriter{enabled: true, path: inv.Trace.Path, graphHash: graphHash}
-	return w, w.writeBytes(trace.ExecutionTrace{GraphHash: graphHash, Events: nil})
+	return &traceFileWriter{enabled: true, w: w, graphHash: graphHash}
 }
 
 func (w *traceFileWriter) Finalize(gr *dag.GraphResult) error {
 	if w == nil || !w.enabled {
 		return nil
 	}
+	// Emit canonical JSON trace bytes if available; otherwise, emit an empty trace.
 	if gr != nil && len(gr.TraceBytes) > 0 {
-		return writeFileAtomic(w.path, gr.TraceBytes, 0o644)
+		_, err := w.w.Write(append(gr.TraceBytes, '\n'))
+		return err
 	}
-	// If we don't have trace bytes (e.g., internal error or panic), still emit a valid
-	// empty trace for this graph.
-	return w.writeBytes(trace.ExecutionTrace{GraphHash: w.graphHash, Events: nil})
-}
-
-func (w *traceFileWriter) writeBytes(t trace.ExecutionTrace) error {
-	b, err := t.CanonicalJSON()
+	b, err := trace.ExecutionTrace{GraphHash: w.graphHash, Events: nil}.CanonicalJSON()
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(w.path, b, 0o644)
+	_, err = w.w.Write(append(b, '\n'))
+	return err
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

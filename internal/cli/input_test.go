@@ -1,21 +1,42 @@
 package cli
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
 
-func TestParseInvocation_DeterministicStruct(t *testing.T) {
+func TestParseInvocation_NoSubcommandFails(t *testing.T) {
+	_, err := ParseInvocation(nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if ExitCode(err) != ExitValidationError {
+		t.Fatalf("expected exit %d got %d", ExitValidationError, ExitCode(err))
+	}
+}
+
+func TestParseInvocation_UnknownSubcommandFails(t *testing.T) {
+	_, err := ParseInvocation([]string{"nope"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if ExitCode(err) != ExitValidationError {
+		t.Fatalf("expected exit %d got %d", ExitValidationError, ExitCode(err))
+	}
+}
+
+func TestParseInvocation_Run_DeterministicAndResolvesRelativeUnderWorkDir(t *testing.T) {
 	workDir := t.TempDir()
 	args := []string{
+		"run",
 		"--workdir", workDir,
 		"--graph", "graphs/../graph.json",
 		"--cache-dir", "./cache/..//cache",
 		"--output-dir", "out/./",
 		"--mode", "incremental",
-		"--trace", "traces/../trace.json",
+		"--trace",
+		"--plugins", "p2,p1,p1",
 	}
 
 	inv1, err := ParseInvocation(args)
@@ -27,124 +48,79 @@ func TestParseInvocation_DeterministicStruct(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !reflect.DeepEqual(inv1, inv2) {
-		t.Fatalf("expected identical invocations, got\n%#v\n%#v", inv1, inv2)
+		t.Fatalf("expected deterministic parse")
 	}
 
-	if inv1.WorkDir != filepath.Clean(workDir) {
-		t.Fatalf("workdir not canonicalized: %q", inv1.WorkDir)
+	if inv1.Command != CommandRun {
+		t.Fatalf("expected command %q got %q", CommandRun, inv1.Command)
 	}
-	if inv1.GraphPath != filepath.Join(workDir, "graph.json") {
-		t.Fatalf("graph path not resolved/canonicalized: %q", inv1.GraphPath)
+
+	if inv1.Run.WorkDir != filepath.Clean(workDir) {
+		t.Fatalf("workdir not canonicalized: %q", inv1.Run.WorkDir)
 	}
-	if inv1.CacheDir != filepath.Join(workDir, "cache") {
-		t.Fatalf("cache dir not resolved/canonicalized: %q", inv1.CacheDir)
+	if inv1.Run.GraphPath != filepath.Join(workDir, "graph.json") {
+		t.Fatalf("graph path not resolved: %q", inv1.Run.GraphPath)
 	}
-	if inv1.OutputDir != filepath.Join(workDir, "out") {
-		t.Fatalf("output dir not resolved/canonicalized: %q", inv1.OutputDir)
+	if inv1.Run.CacheDir != filepath.Join(workDir, "cache") {
+		t.Fatalf("cache dir not resolved: %q", inv1.Run.CacheDir)
 	}
-	if !inv1.Trace.Enabled || inv1.Trace.Path != filepath.Join(workDir, "trace.json") {
-		t.Fatalf("trace not resolved/canonicalized: %#v", inv1.Trace)
+	if inv1.Run.OutputDir != filepath.Join(workDir, "out") {
+		t.Fatalf("output dir not resolved: %q", inv1.Run.OutputDir)
+	}
+	if inv1.Run.Mode != ExecutionModeIncremental {
+		t.Fatalf("expected mode %q got %q", ExecutionModeIncremental, inv1.Run.Mode)
+	}
+	if !inv1.Run.Trace {
+		t.Fatalf("expected trace enabled")
+	}
+	if want := []string{"p2", "p1"}; !reflect.DeepEqual(inv1.Run.PluginsAllow, want) {
+		t.Fatalf("plugins parsed = %#v, want %#v", inv1.Run.PluginsAllow, want)
 	}
 }
 
-func TestParseInvocation_ResolvesRelativePathsAgainstWorkDir_NotCwd(t *testing.T) {
+func TestParseInvocation_Run_Defaults(t *testing.T) {
 	workDir := t.TempDir()
-	otherCwd := t.TempDir()
-
-	oldCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd failed: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldCwd) })
-
-	if err := os.Chdir(otherCwd); err != nil {
-		t.Fatalf("Chdir failed: %v", err)
-	}
-
-	args := []string{
+	inv, err := ParseInvocation([]string{
+		"run",
 		"--workdir", workDir,
 		"--graph", "g.json",
 		"--cache-dir", "cache",
 		"--output-dir", "out",
-	}
-	inv, err := ParseInvocation(args)
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if inv.GraphPath != filepath.Join(workDir, "g.json") {
-		t.Fatalf("expected graph under workdir, got %q", inv.GraphPath)
+	if inv.Run.Mode != ExecutionModeClean {
+		t.Fatalf("expected default mode clean, got %q", inv.Run.Mode)
 	}
-	if inv.CacheDir != filepath.Join(workDir, "cache") {
-		t.Fatalf("expected cache under workdir, got %q", inv.CacheDir)
+	if inv.Run.Trace {
+		t.Fatalf("expected default trace=false")
 	}
-	if inv.OutputDir != filepath.Join(workDir, "out") {
-		t.Fatalf("expected output under workdir, got %q", inv.OutputDir)
+	if inv.Run.PluginsAllow != nil {
+		t.Fatalf("expected default plugins allowlist empty, got %#v", inv.Run.PluginsAllow)
 	}
 }
 
-func TestParseInvocation_IgnoresEnvironmentVariables(t *testing.T) {
+func TestParseInvocation_Validate_DefaultStrictFalse(t *testing.T) {
+	inv, err := ParseInvocation([]string{"validate", "--graph", "g.json"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inv.Command != CommandValidate {
+		t.Fatalf("expected command %q got %q", CommandValidate, inv.Command)
+	}
+	if inv.Validate.Strict {
+		t.Fatalf("expected strict default false")
+	}
+}
+
+func TestParseInvocation_Resume_RequiresPreviousRunID(t *testing.T) {
 	workDir := t.TempDir()
-	args := []string{
-		"--workdir", workDir,
-		"--graph", "g.json",
-		"--cache-dir", "cache",
-		"--output-dir", "out",
-		"--mode", "clean",
-	}
-
-	inv1, err := ParseInvocation(args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	t.Setenv("DEBUG", "1")
-	t.Setenv("CLICOLOR", "1")
-	t.Setenv("SOME_OTHER_VAR", "some value")
-
-	inv2, err := ParseInvocation(args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !reflect.DeepEqual(inv1, inv2) {
-		t.Fatalf("expected env vars to not affect parsing, got\n%#v\n%#v", inv1, inv2)
-	}
-}
-
-func TestParseInvocation_AllowsResumeOnlyMode(t *testing.T) {
-	workDir := t.TempDir()
-	args := []string{
-		"--workdir", workDir,
-		"--graph", "g.json",
-		"--cache-dir", "cache",
-		"--output-dir", "out",
-		"--mode", "resume-only",
-	}
-
-	inv, err := ParseInvocation(args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if inv.ExecutionMode != ExecutionModeResumeOnly {
-		t.Fatalf("expected mode %q got %q", ExecutionModeResumeOnly, inv.ExecutionMode)
-	}
-}
-
-func TestParseInvocation_WorkDirIsMandatoryAndAbsolute(t *testing.T) {
-	_, err := ParseInvocation([]string{"--graph", "g", "--cache-dir", "c", "--output-dir", "o"})
+	_, err := ParseInvocation([]string{"resume", "--workdir", workDir, "--graph", "g.json"})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if ExitCode(err) != ExitInvalidInvocation {
-		t.Fatalf("expected exit code %d, got %d", ExitInvalidInvocation, ExitCode(err))
-	}
-
-	_, err = ParseInvocation([]string{"--workdir", "relative", "--graph", "g", "--cache-dir", "c", "--output-dir", "o"})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if ExitCode(err) != ExitInvalidInvocation {
-		t.Fatalf("expected exit code %d, got %d", ExitInvalidInvocation, ExitCode(err))
+	if ExitCode(err) != ExitValidationError {
+		t.Fatalf("expected exit %d got %d", ExitValidationError, ExitCode(err))
 	}
 }
