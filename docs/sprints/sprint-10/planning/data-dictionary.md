@@ -45,6 +45,12 @@
 * Required: yes (resume only)
 * Description: Identifier of prior run
 
+### graph
+
+* Type: string (path)
+* Required: yes (resume, run, validate)
+* Description: Path to graph definition (must match hash for resume)
+
 ### retry-failed-only
 
 * Type: boolean

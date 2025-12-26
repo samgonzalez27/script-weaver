@@ -52,6 +52,7 @@ Purpose: Resume a previous run.
 
 Required flags:
 - `--workdir`
+- `--graph`
 - `--previous-run-id`
 
 Optional flags:
@@ -59,6 +60,8 @@ Optional flags:
 
 Behavior:
 - Loads prior run state
+- Validates that the provided `--graph` matches the graph hash of the previous run
+- Fails with validation error (exit code 1) if hashes do not match
 - Creates a new run linked via `previous_run_id`
 
 ## plugins

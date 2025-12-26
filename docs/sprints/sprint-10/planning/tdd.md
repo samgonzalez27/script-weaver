@@ -23,7 +23,8 @@
 
 ## resume
 
-- Resume requires valid previous_run_id
+- Resume requires valid previous_run_id and graph
+- Resume fails if graph hash differs from previous run (exit code 1)
 - New run links to prior run
 - Resume without prior run fails
 - Default behavior: retry-failed-only=false (resumes all pending)
