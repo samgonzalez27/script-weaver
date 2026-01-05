@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"scriptweaver/internal/core"
@@ -56,7 +57,7 @@ func (c cliGraphExecutor) Run(ctx context.Context, graph *dag.TaskGraph, runner 
 }
 
 type CLIResult struct {
-	ExitCode   int
+	ExitCode    int
 	GraphResult *dag.GraphResult
 }
 
@@ -172,7 +173,13 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 	retryCount := 0
 	var resumePlan *incremental.IncrementalPlan
 	if inv.ExecutionMode == ExecutionModeIncremental || inv.ExecutionMode == ExecutionModeResumeOnly {
-		prevID, perr := detectPreviousRunID(st, graphHash)
+		prevID := ""
+		var perr error
+		if strings.TrimSpace(inv.ResumeRunID) != "" {
+			prevID = strings.TrimSpace(inv.ResumeRunID)
+		} else {
+			prevID, perr = detectPreviousRunID(st, graphHash)
+		}
 		if perr != nil {
 			if inv.ExecutionMode == ExecutionModeResumeOnly {
 				if runID != "" {
@@ -189,19 +196,19 @@ func ExecuteWithExecutor(ctx context.Context, inv CLIInvocation, executor GraphE
 				if _, ferr := st.LoadFailure(prevID); ferr == nil {
 					checkpoints, cerr := st.LoadAllCheckpoints(prevID)
 					if cerr == nil && len(checkpoints) > 0 {
-							plan, checkpointNode, snap, invMap, corruption := buildResumePlan(ctx, graphObj, runner, cacheRunner, cache, checkpoints)
-							if corruption != nil {
-								// Resume-only hard-fails; incremental falls back to scratch execution.
-								if inv.ExecutionMode == ExecutionModeResumeOnly {
-									if runID != "" {
-										_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
-										_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "WorkspaceCorrupt", Message: corruption.Error(), Cause: corruption})
-									}
-									res.ExitCode = ExitConfigError
-									return res, corruption
+						plan, checkpointNode, snap, invMap, corruption := buildResumePlan(ctx, graphObj, runner, cacheRunner, cache, checkpoints)
+						if corruption != nil {
+							// Resume-only hard-fails; incremental falls back to scratch execution.
+							if inv.ExecutionMode == ExecutionModeResumeOnly {
+								if runID != "" {
+									_ = rec.StartRun(state.Run{RunID: runID, GraphHash: graphHash, StartTime: time.Now().UTC(), Mode: state.ExecutionMode(inv.ExecutionMode), RetryCount: 0, Status: "failed", PreviousRunID: nil})
+									_ = rec.RecordFailure(runID, &state.WorkspaceFailureError{Code: "WorkspaceCorrupt", Message: corruption.Error(), Cause: corruption})
 								}
-								// incremental: ignore resume plan
-							} else if plan != nil && checkpointNode != "" {
+								res.ExitCode = ExitConfigError
+								return res, corruption
+							}
+							// incremental: ignore resume plan
+						} else if plan != nil && checkpointNode != "" {
 							candidatePrevID := prevID
 							candidatePrevPtr := &candidatePrevID
 							candidateRetry := prevRun.RetryCount + 1
@@ -547,9 +554,9 @@ func cacheForMode(mode ExecutionMode, cacheDir string) (core.Cache, error) {
 
 type noCache struct{}
 
-func (noCache) Has(core.TaskHash) (bool, error) { return false, nil }
+func (noCache) Has(core.TaskHash) (bool, error)             { return false, nil }
 func (noCache) Get(core.TaskHash) (*core.CacheEntry, error) { return nil, nil }
-func (noCache) Put(*core.CacheEntry) error { return nil }
+func (noCache) Put(*core.CacheEntry) error                  { return nil }
 
 func prepareOutputDir(dir string) error {
 	if dir == "" {
@@ -591,8 +598,8 @@ func loadGraphAndHash(path string) (*dag.TaskGraph, string, error) {
 }
 
 type traceFileWriter struct {
-	enabled bool
-	path    string
+	enabled   bool
+	path      string
 	graphHash string
 }
 

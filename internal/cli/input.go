@@ -38,12 +38,15 @@ type TraceConfig struct {
 // NOTE: WorkDir is required and must be absolute; this prevents any dependency
 // on the process current working directory.
 type CLIInvocation struct {
-	GraphPath      string
-	WorkDir        string
-	CacheDir       string
-	OutputDir      string
-	ExecutionMode  ExecutionMode
-	Trace          TraceConfig
+	GraphPath     string
+	WorkDir       string
+	CacheDir      string
+	OutputDir     string
+	ExecutionMode ExecutionMode
+	Trace         TraceConfig
+	// ResumeRunID selects a specific prior run for resume planning.
+	// Empty means "auto-detect".
+	ResumeRunID    string
 	OriginalGraph  string
 	OriginalCache  string
 	OriginalOutput string
