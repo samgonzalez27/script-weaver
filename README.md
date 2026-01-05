@@ -1,123 +1,103 @@
 # ScriptWeaver
 
-A deterministic task execution tool written in Go. ScriptWeaver ensures that identical inputs always produce identical outputs, enabling safe caching and replay of task results.
+ScriptWeaver is a **deterministic task execution engine** designed to make complex build, data, and automation workflows **predictable, auditable, and replayable**.
 
-## Features
+Unlike general-purpose task runners, ScriptWeaver prioritizes correctness and reproducibility above all else. It ensures that identical inputs always produce identical outputs, enabling safe content-addressable caching and reliable failure recovery.
 
-- **Deterministic Execution** — Tasks execute in isolated, controlled environments with explicit inputs and outputs
-- **Content-Based Caching** — Results are cached based on file contents, not timestamps
-- **Reproducible Builds** — Identical inputs always produce identical outputs across runs and machines
-- **DAG Support** — Tasks can be organized as directed acyclic graphs with automatic dependency resolution
-- **Incremental Builds** — Only re-execute tasks when their inputs change
+## Current Status
+
+**Active Sprint: 10-B (Completed)**
+
+The core engine is fully implemented, featuring incremental execution, DAG resolution, deterministic recovery, plugin hooks, and a canonical CLI.
+
+## Key Features
+
+- **Strict Determinism**: Tasks run in isolated environments. Inputs, outputs, and environment variables are explicitly controlled.
+- **Incremental Execution**: Only re-executes tasks when inputs change. Uses content hashing rather than timestamps.
+- **Execution Recovery**: Automatically resume failed workflows from the last successful checkpoint (`--resume`).
+- **Deterministic Tracing**: Produces a byte-for-byte reproducible JSON trace of every execution decision.
+- **Plugin System**: lifecycle hooks to extend behavior without modifying the core engine.
+- **Canonical CLI**: A strict, minimal command-line interface `sw`.
 
 ## Installation
 
-### Prerequisites
-
-- Go 1.22 or later
-
-### From Source
+Prerequisites: Go 1.22+
 
 ```bash
 git clone https://github.com/samgonzalez27/script-weaver.git
 cd script-weaver
-go build -o scriptweaver ./cmd/scriptweaver
+go build -o sw ./cmd/sw
 ```
 
-## Quick Start
+## Usage
+
+ScriptWeaver uses a strict CLI (`sw`). All paths must be explicit.
+
+### Run a Graph
+Execute tasks defined in a graph file.
 
 ```bash
-# Run scriptweaver
-./scriptweaver [options]
+./sw run --graph ./graphs/build.json --workdir $(pwd)
 ```
 
-## How It Works
+**Flags**:
+- `--graph <path>`: (Required) Path to graph definition.
+- `--workdir <path>`: (Required) Absolute root directory for execution.
+- `--mode <clean|incremental>`: Execution strategy (default: `incremental`).
+- `--resume <run-id>`: Resume a specific failed run ID.
+- `--trace`: Enable deterministic trace logging.
+- `--plugin-dir <path>`: Load plugins from directory.
 
-ScriptWeaver computes a **Task Hash** for each task based on:
+### Validate a Graph
+Check schema and cycle detection without running tasks.
 
-- Sorted list of input file contents
-- Expanded and sorted input paths
-- Task command (`run`)
-- Explicit environment variables (`env`)
-- Declared outputs
-- Working directory identity
-
-If a Task Hash matches a previous execution, cached results are replayed exactly—including stdout, stderr, and exit code.
-
-## Task Definition
-
-Tasks are defined declaratively using structured configuration (YAML or JSON):
-
-```yaml
-name: build
-inputs:
-  - src/**/*.go
-  - go.mod
-  - go.sum
-run: go build -o ./bin/app ./cmd/app
-outputs:
-  - bin/app
-env:
-  CGO_ENABLED: "0"
+```bash
+./sw validate --graph ./graphs/build.json
 ```
 
-### Required Fields
+### Compute Graph Hash
+Print the canonical structural hash of the graph.
 
-| Field    | Description                                      |
-|----------|--------------------------------------------------|
-| `name`   | Logical identifier for the task                  |
-| `inputs` | List of file paths or glob patterns              |
-| `run`    | Command string to execute                        |
+```bash
+./sw hash --graph ./graphs/build.json
+```
 
-### Optional Fields
+### Manage Plugins
+List available plugins in deterministic order.
 
-| Field     | Description                                                |
-|-----------|------------------------------------------------------------|
-| `env`     | Map of environment variables (only these are visible)      |
-| `outputs` | List of file paths/directories produced by the task        |
-
-## Deterministic Guarantees
-
-1. **Input Determinism** — Glob expansion is strictly sorted; file ordering is stable
-2. **Environment Determinism** — Only declared environment variables are visible
-3. **Execution Determinism** — Tasks run in isolated environments
-4. **Output Determinism** — Outputs are normalized to remove non-deterministic data
+```bash
+./sw plugins list --plugin-dir ./plugins
+```
 
 ## Project Structure
 
 ```
 script-weaver/
-├── cmd/scriptweaver/     # CLI entrypoint
-├── cli/                  # CLI tests
+├── cmd/sw/               # Canonical CLI entrypoint
 ├── internal/
-│   ├── cli/              # CLI parsing and execution
-│   ├── core/             # Domain models (Task, Input, Artifact)
-│   ├── dag/              # DAG construction and traversal
-│   ├── incremental/      # Incremental build support
-│   └── trace/            # Execution tracing
-├── docs/sprints/         # Sprint planning and documentation
+│   ├── cli/              # CLI orchestration and logic
+│   ├── engine/           # The core deterministic engine (Read-Only)
+│   ├── dag/              # Graph processing and scheduling
+│   ├── pluginengine/     # Plugin discovery and hook execution
+│   └── recovery/         # State management and failure recording
+├── docs/sprints/         # Detailed planning and summary docs
 └── go.mod
 ```
 
-## Development
+## Sprint History
 
-### Running Tests
-
-```bash
-go test ./...
-```
-
-### Building
-
-```bash
-go build -o scriptweaver ./cmd/scriptweaver
-```
+- **Sprint 10-B**: Canonical CLI Implementation (`sw run`, `sw validate`, `sw hash`).
+- **Sprint 09**: Plugin System foundations and lifecycle hooks.
+- **Sprint 08**: Execution Recovery and state persistence.
+- **Sprint 06**: Graph Hashing and structural validation.
+- **Sprint 05**: "Minimal Surface Area" philosophy adopted.
+- **Sprint 02-04**: Incremental execution and DAG engine.
+- **Sprint 00-01**: Project foundation.
 
 ## Documentation
 
-Detailed specifications and design documents are available in the `docs/sprints/` directory, organized by development sprint.
+Detailed architectural notes, specifications, and sprint summaries are located in `docs/sprints/`. See `docs/project/` for high-level Vision and Constraints.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
+MIT License.
