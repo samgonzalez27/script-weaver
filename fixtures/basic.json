@@ -1,0 +1,10 @@
+{
+  "tasks": [
+    {
+      "name": "t1",
+      "run": "sh -c 'echo ok > out.txt'",
+      "outputs": ["out.txt"]
+    }
+  ],
+  "edges": []
+}

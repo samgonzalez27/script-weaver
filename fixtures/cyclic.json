@@ -1,0 +1,10 @@
+{
+  "tasks": [
+    {"name": "A", "run": "echo A"},
+    {"name": "B", "run": "echo B"}
+  ],
+  "edges": [
+    {"from": "A", "to": "B"},
+    {"from": "B", "to": "A"}
+  ]
+}
